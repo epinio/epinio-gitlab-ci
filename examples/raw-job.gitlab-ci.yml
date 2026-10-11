@@ -1,0 +1,84 @@
+# Equivalent raw job for pipelines that cannot include the CI/CD component
+# (older GitLab, air-gapped without catalog, or copy-paste into an existing
+# .gitlab-ci.yml). Keep this file identical to the README "Raw job" section.
+#
+# Required CI/CD variables: EPINIO_URL, and either EPINIO_TOKEN or
+# EPINIO_USER + EPINIO_PASSWORD.
+# Optional: EPINIO_TRUST_CA=true, EPINIO_APP_NAME, EPINIO_NAMESPACE,
+# EPINIO_SOURCE_PATH, EPINIO_GIT_REF, EPINIO_IMAGE_TAG.
+
+stages:
+  - deploy
+
+deploy-epinio:
+  stage: deploy
+  image: alpine:3.21
+  variables:
+    EPINIO_APP_NAME: "$CI_PROJECT_NAME"
+    EPINIO_NAMESPACE: "workspace"
+    EPINIO_SOURCE_PATH: "."
+    EPINIO_GIT_REF: ""
+    EPINIO_IMAGE_TAG: ""
+  before_script:
+    - apk add --no-cache ca-certificates curl
+    - |
+      set -eu
+      ARCH="$(uname -m)"
+      case "$ARCH" in
+        x86_64|amd64) ARCH=x86_64 ;;
+        aarch64|arm64) ARCH=arm64 ;;
+        armv7l) ARCH=armv7 ;;
+        *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+      esac
+      VERSION="$(curl -fsSL https://api.github.com/repos/epinio/epinio/releases/latest | sed -n 's/.*"tag_name": "\(v[^"]*\)".*/\1/p' | head -n1)"
+      test -n "$VERSION"
+      curl -fsSL -o /usr/local/bin/epinio \
+        "https://github.com/epinio/epinio/releases/download/${VERSION}/epinio-linux-${ARCH}"
+      chmod +x /usr/local/bin/epinio
+      epinio --version
+  script:
+    - |
+      set -eu
+      URL="${EPINIO_URL:-}"
+      if [ -z "$URL" ]; then
+        echo "EPINIO_URL variable is required"
+        exit 1
+      fi
+
+      if [ -n "${EPINIO_TOKEN:-}" ]; then
+        mkdir -p "${HOME}/.config/epinio"
+        API="${URL%/}"
+        case "$API" in
+          https://*) WSS="wss://${API#https://}" ;;
+          http://*) WSS="ws://${API#http://}" ;;
+          *) WSS="$API" ;;
+        esac
+        printf '%s\n' \
+          "api: \"${API}\"" \
+          "wss: \"${WSS}\"" \
+          'user: ""' \
+          'pass: ""' \
+          "colors: true" \
+          "namespace: \"${EPINIO_NAMESPACE}\"" \
+          "token:" \
+          "  accesstoken: \"${EPINIO_TOKEN}\"" \
+          > "${HOME}/.config/epinio/settings.yaml"
+      elif [ -n "${EPINIO_USER:-}" ] && [ -n "${EPINIO_PASSWORD:-}" ]; then
+        if [ "${EPINIO_TRUST_CA:-}" = "true" ]; then
+          epinio login "$URL" --user "$EPINIO_USER" --password "$EPINIO_PASSWORD" --trust-ca
+        else
+          epinio login "$URL" --user "$EPINIO_USER" --password "$EPINIO_PASSWORD"
+        fi
+        epinio target "${EPINIO_NAMESPACE}"
+      else
+        echo "Set EPINIO_TOKEN, or EPINIO_USER and EPINIO_PASSWORD"
+        exit 1
+      fi
+
+      if [ -n "${EPINIO_IMAGE_TAG}" ]; then
+        epinio push --name "${EPINIO_APP_NAME}" --container-image-url "${EPINIO_IMAGE_TAG}"
+      elif [ -n "${EPINIO_GIT_REF}" ]; then
+        epinio push --name "${EPINIO_APP_NAME}" --git "${CI_PROJECT_URL}.git,${EPINIO_GIT_REF}"
+      else
+        epinio push --name "${EPINIO_APP_NAME}" --path "${EPINIO_SOURCE_PATH}"
+      fi
