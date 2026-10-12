@@ -69,7 +69,7 @@ Prefer `EPINIO_TOKEN` over username/password so the password is not passed on th
 1. In the GitLab project: **Settings → General → CI/CD Catalog project** → enable.
 2. Set a clear **project description**.
 3. Ensure this `README.md` and `templates/deploy.yml` exist on the commit you tag.
-4. Create a **semver** tag (`1.0.0` or `v1.0.0`). The `create-release` job uses the `release` keyword so the version is published to the CI/CD Catalog.
+4. Create a **semver** tag such as `1.0.0`. The `create-release` job uses the `release` keyword so the version is published to the CI/CD Catalog.
 
 ## Raw job
 
@@ -91,6 +91,8 @@ stages:
 deploy-epinio:
   stage: deploy
   image: alpine:3.21
+  # Serialize deploys so two pipelines never push the same app at once.
+  resource_group: epinio-deploy
   variables:
     EPINIO_APP_NAME: "$CI_PROJECT_NAME"
     EPINIO_NAMESPACE: "workspace"
@@ -117,8 +119,12 @@ deploy-epinio:
         v*) ;;
         *) VERSION="v${VERSION}" ;;
       esac
-      curl -fsSL -o /usr/local/bin/epinio \
-        "https://github.com/epinio/epinio/releases/download/${VERSION}/epinio-linux-${ARCH}"
+      BASE="https://github.com/epinio/epinio/releases/download/${VERSION}"
+      curl -fsSL -o /usr/local/bin/epinio "${BASE}/epinio-linux-${ARCH}"
+      curl -fsSL -o /tmp/epinio_checksums.txt "${BASE}/epinio_${VERSION#v}_checksums.txt"
+      EXPECTED="$(awk -v f="epinio-linux-${ARCH}" '$2 == f { print $1 }' /tmp/epinio_checksums.txt)"
+      test -n "$EXPECTED"
+      echo "${EXPECTED}  /usr/local/bin/epinio" | sha256sum -c -
       chmod +x /usr/local/bin/epinio
       epinio --version
   script:

@@ -44,6 +44,8 @@ spec:
 deploy-epinio:
   stage: deploy
   image: alpine:3.21
+  # Serialize deploys so two pipelines never push the same app at once.
+  resource_group: epinio-deploy
   variables:
     EPINIO_APP_NAME: "$[[ inputs.app_name ]]"
     EPINIO_NAMESPACE: "$[[ inputs.namespace ]]"
@@ -72,8 +74,12 @@ deploy-epinio:
         v*) ;;
         *) VERSION="v${VERSION}" ;;
       esac
-      curl -fsSL -o /usr/local/bin/epinio \
-        "https://github.com/epinio/epinio/releases/download/${VERSION}/epinio-linux-${ARCH}"
+      BASE="https://github.com/epinio/epinio/releases/download/${VERSION}"
+      curl -fsSL -o /usr/local/bin/epinio "${BASE}/epinio-linux-${ARCH}"
+      curl -fsSL -o /tmp/epinio_checksums.txt "${BASE}/epinio_${VERSION#v}_checksums.txt"
+      EXPECTED="$(awk -v f="epinio-linux-${ARCH}" '$2 == f { print $1 }' /tmp/epinio_checksums.txt)"
+      test -n "$EXPECTED"
+      echo "${EXPECTED}  /usr/local/bin/epinio" | sha256sum -c -
       chmod +x /usr/local/bin/epinio
       epinio --version
   script:
