@@ -32,6 +32,7 @@ validate:templates:
           "git_ref",
           "epinio_url",
           "image_tag",
+          "epinio_version",
       }
       missing = required - set(inputs)
       if missing:
@@ -55,7 +56,7 @@ validate:templates:
 
 create-release:
   stage: release
-  image: registry.gitlab.com/gitlab-org/cli:latest
+  image: registry.gitlab.com/gitlab-org/cli:v1.122.0
   script:
     - echo "Creating release $CI_COMMIT_TAG"
   rules:

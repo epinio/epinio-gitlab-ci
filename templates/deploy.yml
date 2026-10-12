@@ -1,8 +1,9 @@
 spec:
   inputs:
     app_name:
-      description: Epinio application name. Defaults to the GitLab project name.
-      default: "$CI_PROJECT_NAME"
+      description: >
+        Epinio application name. Empty falls back to $CI_PROJECT_NAME in the job script.
+      default: ""
     namespace:
       description: Epinio namespace to target before deploy.
       default: "workspace"
@@ -19,18 +20,26 @@ spec:
     epinio_url:
       description: >
         Epinio API URL (for example https://epinio.example.com).
-        Defaults to the EPINIO_URL CI/CD variable.
-      default: "$EPINIO_URL"
+        Empty falls back to the EPINIO_URL CI/CD variable.
+      default: ""
     image_tag:
       description: >
         Container image reference including tag (registry/name:tag).
         When set, deploys that image with no source build.
       default: ""
+    epinio_version:
+      description: >
+        Epinio CLI release tag to install (for example v1.14.2 or 1.14.2).
+        A missing v prefix is added automatically. Empty installs the latest
+        GitHub release.
+      default: ""
 ---
 
 # Requires CI/CD variables: EPINIO_URL (or epinio_url input), and either
 # EPINIO_TOKEN or EPINIO_USER + EPINIO_PASSWORD.
-# Optional: EPINIO_TRUST_CA=true for self-signed API certificates.
+# Optional: EPINIO_TRUST_CA=true for self-signed API certificates
+# (user/password: --trust-ca; token: SKIP_SSL_VERIFICATION).
+# Optional: EPINIO_VERSION CI variable overrides epinio_version when set.
 # Parent pipeline must include a `deploy` stage (or override this job's stage).
 deploy-epinio:
   stage: deploy
@@ -42,6 +51,7 @@ deploy-epinio:
     EPINIO_GIT_REF: "$[[ inputs.git_ref ]]"
     EPINIO_API_URL: "$[[ inputs.epinio_url ]]"
     EPINIO_IMAGE_TAG: "$[[ inputs.image_tag ]]"
+    EPINIO_CLI_VERSION: "$[[ inputs.epinio_version ]]"
   before_script:
     - apk add --no-cache ca-certificates curl
     - |
@@ -53,8 +63,15 @@ deploy-epinio:
         armv7l) ARCH=armv7 ;;
         *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
       esac
-      VERSION="$(curl -fsSL https://api.github.com/repos/epinio/epinio/releases/latest | sed -n 's/.*"tag_name": "\(v[^"]*\)".*/\1/p' | head -n1)"
+      VERSION="${EPINIO_VERSION:-${EPINIO_CLI_VERSION:-}}"
+      if [ -z "$VERSION" ]; then
+        VERSION="$(curl -fsSL https://api.github.com/repos/epinio/epinio/releases/latest | sed -n 's/.*"tag_name": "\(v[^"]*\)".*/\1/p' | head -n1)"
+      fi
       test -n "$VERSION"
+      case "$VERSION" in
+        v*) ;;
+        *) VERSION="v${VERSION}" ;;
+      esac
       curl -fsSL -o /usr/local/bin/epinio \
         "https://github.com/epinio/epinio/releases/download/${VERSION}/epinio-linux-${ARCH}"
       chmod +x /usr/local/bin/epinio
@@ -66,6 +83,15 @@ deploy-epinio:
       if [ -z "$URL" ]; then
         echo "epinio_url input or EPINIO_URL variable is required"
         exit 1
+      fi
+      APP_NAME="${EPINIO_APP_NAME:-${CI_PROJECT_NAME}}"
+      if [ -z "$APP_NAME" ]; then
+        echo "app_name input or CI_PROJECT_NAME is required"
+        exit 1
+      fi
+
+      if [ "${EPINIO_TRUST_CA:-}" = "true" ]; then
+        export SKIP_SSL_VERIFICATION=true
       fi
 
       if [ -n "${EPINIO_TOKEN:-}" ]; then
@@ -99,9 +125,9 @@ deploy-epinio:
       fi
 
       if [ -n "${EPINIO_IMAGE_TAG}" ]; then
-        epinio push --name "${EPINIO_APP_NAME}" --container-image-url "${EPINIO_IMAGE_TAG}"
+        epinio push --name "${APP_NAME}" --container-image-url "${EPINIO_IMAGE_TAG}"
       elif [ -n "${EPINIO_GIT_REF}" ]; then
-        epinio push --name "${EPINIO_APP_NAME}" --git "${CI_PROJECT_URL}.git,${EPINIO_GIT_REF}"
+        epinio push --name "${APP_NAME}" --git "${CI_PROJECT_URL}.git,${EPINIO_GIT_REF}"
       else
-        epinio push --name "${EPINIO_APP_NAME}" --path "${EPINIO_SOURCE_PATH}"
+        epinio push --name "${APP_NAME}" --path "${EPINIO_SOURCE_PATH}"
       fi

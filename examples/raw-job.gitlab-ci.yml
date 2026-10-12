@@ -5,7 +5,7 @@
 # Required CI/CD variables: EPINIO_URL, and either EPINIO_TOKEN or
 # EPINIO_USER + EPINIO_PASSWORD.
 # Optional: EPINIO_TRUST_CA=true, EPINIO_APP_NAME, EPINIO_NAMESPACE,
-# EPINIO_SOURCE_PATH, EPINIO_GIT_REF, EPINIO_IMAGE_TAG.
+# EPINIO_SOURCE_PATH, EPINIO_GIT_REF, EPINIO_IMAGE_TAG, EPINIO_VERSION.
 
 stages:
   - deploy
@@ -30,8 +30,15 @@ deploy-epinio:
         armv7l) ARCH=armv7 ;;
         *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
       esac
-      VERSION="$(curl -fsSL https://api.github.com/repos/epinio/epinio/releases/latest | sed -n 's/.*"tag_name": "\(v[^"]*\)".*/\1/p' | head -n1)"
+      VERSION="${EPINIO_VERSION:-}"
+      if [ -z "$VERSION" ]; then
+        VERSION="$(curl -fsSL https://api.github.com/repos/epinio/epinio/releases/latest | sed -n 's/.*"tag_name": "\(v[^"]*\)".*/\1/p' | head -n1)"
+      fi
       test -n "$VERSION"
+      case "$VERSION" in
+        v*) ;;
+        *) VERSION="v${VERSION}" ;;
+      esac
       curl -fsSL -o /usr/local/bin/epinio \
         "https://github.com/epinio/epinio/releases/download/${VERSION}/epinio-linux-${ARCH}"
       chmod +x /usr/local/bin/epinio
@@ -43,6 +50,15 @@ deploy-epinio:
       if [ -z "$URL" ]; then
         echo "EPINIO_URL variable is required"
         exit 1
+      fi
+      APP_NAME="${EPINIO_APP_NAME:-${CI_PROJECT_NAME}}"
+      if [ -z "$APP_NAME" ]; then
+        echo "EPINIO_APP_NAME or CI_PROJECT_NAME is required"
+        exit 1
+      fi
+
+      if [ "${EPINIO_TRUST_CA:-}" = "true" ]; then
+        export SKIP_SSL_VERIFICATION=true
       fi
 
       if [ -n "${EPINIO_TOKEN:-}" ]; then
@@ -76,9 +92,9 @@ deploy-epinio:
       fi
 
       if [ -n "${EPINIO_IMAGE_TAG}" ]; then
-        epinio push --name "${EPINIO_APP_NAME}" --container-image-url "${EPINIO_IMAGE_TAG}"
+        epinio push --name "${APP_NAME}" --container-image-url "${EPINIO_IMAGE_TAG}"
       elif [ -n "${EPINIO_GIT_REF}" ]; then
-        epinio push --name "${EPINIO_APP_NAME}" --git "${CI_PROJECT_URL}.git,${EPINIO_GIT_REF}"
+        epinio push --name "${APP_NAME}" --git "${CI_PROJECT_URL}.git,${EPINIO_GIT_REF}"
       else
-        epinio push --name "${EPINIO_APP_NAME}" --path "${EPINIO_SOURCE_PATH}"
+        epinio push --name "${APP_NAME}" --path "${EPINIO_SOURCE_PATH}"
       fi

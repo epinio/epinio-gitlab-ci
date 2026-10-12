@@ -15,13 +15,14 @@ stages:
 include:
   - component: $CI_SERVER_FQDN/<group>/epinio-gitlab-ci/deploy@1.0.0
     inputs:
-      app_name: $CI_PROJECT_NAME
       namespace: workspace
       source_path: "."
       # git_ref: "main"                 # optional: push from git instead of path
       # image_tag: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
-      epinio_url: $EPINIO_URL
+      # epinio_version: "v1.14.2"       # optional: pin CLI release (default: latest)
 ```
+
+`app_name` defaults to `$CI_PROJECT_NAME` and `epinio_url` to `$EPINIO_URL` inside the job script when those inputs are left empty.
 
 Replace `<group>/epinio-gitlab-ci` with your catalog project path after publishing.
 
@@ -29,18 +30,23 @@ Replace `<group>/epinio-gitlab-ci` with your catalog project path after publishi
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `app_name` | `$CI_PROJECT_NAME` | Epinio application name |
+| `app_name` | `""` | Epinio application name (falls back to `$CI_PROJECT_NAME`) |
 | `namespace` | `workspace` | Epinio namespace to target |
 | `source_path` | `.` | Local path for path-based push |
 | `git_ref` | `""` | When set, push from `$CI_PROJECT_URL.git` at this revision |
-| `epinio_url` | `$EPINIO_URL` | Epinio API URL |
+| `epinio_url` | `""` | Epinio API URL (falls back to `$EPINIO_URL`) |
 | `image_tag` | `""` | When set, deploy this container image (`registry/name:tag`) |
+| `epinio_version` | `""` | Epinio CLI tag to install (for example `v1.14.2` or `1.14.2`; empty = latest). A missing `v` prefix is added automatically. |
 
 Push mode (first match wins):
 
 1. `image_tag` set → `--container-image-url`
 2. `git_ref` set → `--git`
 3. otherwise → `--path` using `source_path`
+
+When using `image_tag`, the caller must build and push that image in an earlier job; this component only deploys the reference.
+
+When using `git_ref`, the Epinio cluster must be able to clone `$CI_PROJECT_URL.git`. **Private repositories** need credentials configured on the Epinio side (for example a gitconfig / deploy key); this component does not inject a GitLab job token into the git clone.
 
 ### Required CI/CD variables
 
@@ -49,7 +55,14 @@ Push mode (first match wins):
 | `EPINIO_URL` | API URL (unless overridden by `epinio_url`) |
 | `EPINIO_TOKEN` **or** `EPINIO_USER` + `EPINIO_PASSWORD` | Authentication |
 
-Optional: `EPINIO_TRUST_CA=true` to pass `--trust-ca` on user/password login (self-signed API certs).
+Optional:
+
+| Variable | Purpose |
+| --- | --- |
+| `EPINIO_TRUST_CA=true` | Self-signed API certs: user/password login uses `--trust-ca`; token auth sets `SKIP_SSL_VERIFICATION=true` |
+| `EPINIO_VERSION` | Pin the Epinio CLI release tag (overrides `epinio_version` input when set) |
+
+Prefer `EPINIO_TOKEN` over username/password so the password is not passed on the CLI.
 
 ## Catalog publishing
 
@@ -70,7 +83,7 @@ For teams that cannot use `include:component` (self-managed without catalog acce
 # Required CI/CD variables: EPINIO_URL, and either EPINIO_TOKEN or
 # EPINIO_USER + EPINIO_PASSWORD.
 # Optional: EPINIO_TRUST_CA=true, EPINIO_APP_NAME, EPINIO_NAMESPACE,
-# EPINIO_SOURCE_PATH, EPINIO_GIT_REF, EPINIO_IMAGE_TAG.
+# EPINIO_SOURCE_PATH, EPINIO_GIT_REF, EPINIO_IMAGE_TAG, EPINIO_VERSION.
 
 stages:
   - deploy
@@ -95,8 +108,15 @@ deploy-epinio:
         armv7l) ARCH=armv7 ;;
         *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
       esac
-      VERSION="$(curl -fsSL https://api.github.com/repos/epinio/epinio/releases/latest | sed -n 's/.*"tag_name": "\(v[^"]*\)".*/\1/p' | head -n1)"
+      VERSION="${EPINIO_VERSION:-}"
+      if [ -z "$VERSION" ]; then
+        VERSION="$(curl -fsSL https://api.github.com/repos/epinio/epinio/releases/latest | sed -n 's/.*"tag_name": "\(v[^"]*\)".*/\1/p' | head -n1)"
+      fi
       test -n "$VERSION"
+      case "$VERSION" in
+        v*) ;;
+        *) VERSION="v${VERSION}" ;;
+      esac
       curl -fsSL -o /usr/local/bin/epinio \
         "https://github.com/epinio/epinio/releases/download/${VERSION}/epinio-linux-${ARCH}"
       chmod +x /usr/local/bin/epinio
@@ -108,6 +128,15 @@ deploy-epinio:
       if [ -z "$URL" ]; then
         echo "EPINIO_URL variable is required"
         exit 1
+      fi
+      APP_NAME="${EPINIO_APP_NAME:-${CI_PROJECT_NAME}}"
+      if [ -z "$APP_NAME" ]; then
+        echo "EPINIO_APP_NAME or CI_PROJECT_NAME is required"
+        exit 1
+      fi
+
+      if [ "${EPINIO_TRUST_CA:-}" = "true" ]; then
+        export SKIP_SSL_VERIFICATION=true
       fi
 
       if [ -n "${EPINIO_TOKEN:-}" ]; then
@@ -141,11 +170,11 @@ deploy-epinio:
       fi
 
       if [ -n "${EPINIO_IMAGE_TAG}" ]; then
-        epinio push --name "${EPINIO_APP_NAME}" --container-image-url "${EPINIO_IMAGE_TAG}"
+        epinio push --name "${APP_NAME}" --container-image-url "${EPINIO_IMAGE_TAG}"
       elif [ -n "${EPINIO_GIT_REF}" ]; then
-        epinio push --name "${EPINIO_APP_NAME}" --git "${CI_PROJECT_URL}.git,${EPINIO_GIT_REF}"
+        epinio push --name "${APP_NAME}" --git "${CI_PROJECT_URL}.git,${EPINIO_GIT_REF}"
       else
-        epinio push --name "${EPINIO_APP_NAME}" --path "${EPINIO_SOURCE_PATH}"
+        epinio push --name "${APP_NAME}" --path "${EPINIO_SOURCE_PATH}"
       fi
 ```
 
@@ -165,8 +194,6 @@ After that, consumers on the self-managed instance include:
 ```yaml
 include:
   - component: $CI_SERVER_FQDN/components/epinio-gitlab-ci/deploy@1.0.0
-    inputs:
-      epinio_url: $EPINIO_URL
 ```
 
 If catalog mirroring is not possible, copy the [raw job](#raw-job) into the application pipeline instead.
